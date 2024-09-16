@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*                                              -*- linux-c -*-
  * dtlk.c - DoubleTalk PC driver for Linux
  *
@@ -298,12 +299,11 @@ static int dtlk_open(struct inode *inode, struct file *file)
 {
 	TRACE_TEXT("(dtlk_open");
 
-	nonseekable_open(inode, file);
 	switch (iminor(inode)) {
 	case DTLK_MINOR:
 		if (dtlk_busy)
 			return -EBUSY;
-		return nonseekable_open(inode, file);
+		return stream_open(inode, file);
 
 	default:
 		return -ENXIO;
@@ -660,4 +660,5 @@ static char dtlk_write_tts(char ch)
 	return 0;
 }
 
+MODULE_DESCRIPTION("RC Systems DoubleTalk PC speech card driver");
 MODULE_LICENSE("GPL");

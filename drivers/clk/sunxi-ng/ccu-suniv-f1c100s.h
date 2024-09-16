@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0+
- *
+/* SPDX-License-Identifier: GPL-2.0+ */
+/*
  * Copyright 2017 Icenowy Zheng <icenowy@aosc.io>
  *
  */
@@ -29,6 +29,6 @@
 
 /* All bus gates, DRAM gates and mod clocks are exported */
 
-#define CLK_NUMBER		(CLK_AVS + 1)
+#define CLK_NUMBER		(CLK_IR + 1)
 
 #endif /* _CCU_SUNIV_F1C100S_H_ */

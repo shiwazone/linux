@@ -2,7 +2,7 @@
 /*
  * Watchdog driver for Marvell Armada 37xx SoCs
  *
- * Author: Marek Behun <marek.behun@nic.cz>
+ * Author: Marek Behún <kabel@kernel.org>
  */
 
 #include <linux/clk.h>
@@ -14,7 +14,6 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/types.h>
@@ -179,6 +178,8 @@ static int armada_37xx_wdt_set_timeout(struct watchdog_device *wdt,
 	dev->timeout = (u64)dev->clk_rate * timeout;
 	do_div(dev->timeout, CNTR_CTRL_PRESCALE_MIN);
 
+	set_counter_value(dev, CNTR_ID_WDOG, dev->timeout);
+
 	return 0;
 }
 
@@ -269,21 +270,17 @@ static int armada_37xx_wdt_probe(struct platform_device *pdev)
 	if (!res)
 		return -ENODEV;
 	dev->reg = devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	if (!dev->reg)
+		return -ENOMEM;
 
 	/* init clock */
-	dev->clk = devm_clk_get(&pdev->dev, NULL);
+	dev->clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(dev->clk))
 		return PTR_ERR(dev->clk);
 
-	ret = clk_prepare_enable(dev->clk);
-	if (ret)
-		return ret;
-
 	dev->clk_rate = clk_get_rate(dev->clk);
-	if (!dev->clk_rate) {
-		ret = -EINVAL;
-		goto disable_clk;
-	}
+	if (!dev->clk_rate)
+		return -EINVAL;
 
 	/*
 	 * Since the timeout in seconds is given as 32 bit unsigned int, and
@@ -307,35 +304,15 @@ static int armada_37xx_wdt_probe(struct platform_device *pdev)
 		set_bit(WDOG_HW_RUNNING, &dev->wdt.status);
 
 	watchdog_set_nowayout(&dev->wdt, nowayout);
-	ret = watchdog_register_device(&dev->wdt);
+	watchdog_stop_on_reboot(&dev->wdt);
+	ret = devm_watchdog_register_device(&pdev->dev, &dev->wdt);
 	if (ret)
-		goto disable_clk;
+		return ret;
 
 	dev_info(&pdev->dev, "Initial timeout %d sec%s\n",
 		 dev->wdt.timeout, nowayout ? ", nowayout" : "");
 
 	return 0;
-
-disable_clk:
-	clk_disable_unprepare(dev->clk);
-	return ret;
-}
-
-static int armada_37xx_wdt_remove(struct platform_device *pdev)
-{
-	struct watchdog_device *wdt = platform_get_drvdata(pdev);
-	struct armada_37xx_watchdog *dev = watchdog_get_drvdata(wdt);
-
-	watchdog_unregister_device(wdt);
-	clk_disable_unprepare(dev->clk);
-	return 0;
-}
-
-static void armada_37xx_wdt_shutdown(struct platform_device *pdev)
-{
-	struct watchdog_device *wdt = platform_get_drvdata(pdev);
-
-	armada_37xx_wdt_stop(wdt);
 }
 
 static int __maybe_unused armada_37xx_wdt_suspend(struct device *dev)
@@ -370,8 +347,6 @@ MODULE_DEVICE_TABLE(of, armada_37xx_wdt_match);
 
 static struct platform_driver armada_37xx_wdt_driver = {
 	.probe		= armada_37xx_wdt_probe,
-	.remove		= armada_37xx_wdt_remove,
-	.shutdown	= armada_37xx_wdt_shutdown,
 	.driver		= {
 		.name	= "armada_37xx_wdt",
 		.of_match_table = of_match_ptr(armada_37xx_wdt_match),
@@ -381,7 +356,7 @@ static struct platform_driver armada_37xx_wdt_driver = {
 
 module_platform_driver(armada_37xx_wdt_driver);
 
-MODULE_AUTHOR("Marek Behun <marek.behun@nic.cz>");
+MODULE_AUTHOR("Marek Behun <kabel@kernel.org>");
 MODULE_DESCRIPTION("Armada 37xx CPU Watchdog");
 
 MODULE_LICENSE("GPL v2");

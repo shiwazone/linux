@@ -2,11 +2,9 @@
 #ifndef BME680_H_
 #define BME680_H_
 
-#define BME680_REG_CHIP_I2C_ID			0xD0
-#define BME680_REG_CHIP_SPI_ID			0x50
+#define BME680_REG_CHIP_ID			0xD0
 #define   BME680_CHIP_ID_VAL			0x61
-#define BME680_REG_SOFT_RESET_I2C		0xE0
-#define BME680_REG_SOFT_RESET_SPI		0x60
+#define BME680_REG_SOFT_RESET			0xE0
 #define   BME680_CMD_SOFTRESET			0xB6
 #define BME680_REG_STATUS			0x73
 #define   BME680_SPI_MEM_PAGE_BIT		BIT(4)
@@ -56,7 +54,9 @@
 #define   BME680_NB_CONV_MASK			GENMASK(3, 0)
 
 #define BME680_REG_MEAS_STAT_0			0x1D
+#define   BME680_NEW_DATA_BIT			BIT(7)
 #define   BME680_GAS_MEAS_BIT			BIT(6)
+#define   BME680_MEAS_BIT			BIT(5)
 
 /* Calibration Parameters */
 #define BME680_T2_LSB_REG	0x8A

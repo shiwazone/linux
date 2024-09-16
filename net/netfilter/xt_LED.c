@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * xt_LED.c - netfilter target to make LEDs blink upon packet matches
  *
  * Copyright (C) 2008 Adam Nielsen <a.nielsen@shikadi.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301 USA.
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -57,7 +43,6 @@ led_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
 	const struct xt_led_info *ledinfo = par->targinfo;
 	struct xt_led_info_internal *ledinternal = ledinfo->internal_data;
-	unsigned long led_delay = XT_LED_BLINK_DELAY;
 
 	/*
 	 * If "always blink" is enabled, and there's still some time until the
@@ -66,7 +51,7 @@ led_tg(struct sk_buff *skb, const struct xt_action_param *par)
 	if ((ledinfo->delay > 0) && ledinfo->always_blink &&
 	    timer_pending(&ledinternal->timer))
 		led_trigger_blink_oneshot(&ledinternal->netfilter_led_trigger,
-					  &led_delay, &led_delay, 1);
+					  XT_LED_BLINK_DELAY, XT_LED_BLINK_DELAY, 1);
 	else
 		led_trigger_event(&ledinternal->netfilter_led_trigger, LED_FULL);
 
@@ -180,7 +165,7 @@ static void led_tg_destroy(const struct xt_tgdtor_param *par)
 
 	list_del(&ledinternal->list);
 
-	del_timer_sync(&ledinternal->timer);
+	timer_shutdown_sync(&ledinternal->timer);
 
 	led_trigger_unregister(&ledinternal->netfilter_led_trigger);
 

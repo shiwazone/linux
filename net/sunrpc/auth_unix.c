@@ -40,11 +40,19 @@ unx_destroy(struct rpc_auth *auth)
 /*
  * Lookup AUTH_UNIX creds for current process
  */
-static struct rpc_cred *
-unx_lookup_cred(struct rpc_auth *auth, struct auth_cred *acred, int flags)
+static struct rpc_cred *unx_lookup_cred(struct rpc_auth *auth,
+					struct auth_cred *acred, int flags)
 {
-	struct rpc_cred *ret = mempool_alloc(unix_pool, GFP_NOFS);
+	struct rpc_cred *ret;
 
+	ret = kmalloc(sizeof(*ret), rpc_task_gfp_mask());
+	if (!ret) {
+		if (!(flags & RPCAUTH_LOOKUP_ASYNC))
+			return ERR_PTR(-ENOMEM);
+		ret = mempool_alloc(unix_pool, GFP_NOWAIT);
+		if (!ret)
+			return ERR_PTR(-ENOMEM);
+	}
 	rpcauth_init_cred(ret, acred, auth, &unix_credops);
 	ret->cr_flags = 1UL << RPCAUTH_CRED_UPTODATE;
 	return ret;
@@ -107,6 +115,8 @@ unx_marshal(struct rpc_task *task, struct xdr_stream *xdr)
 	__be32		*p, *cred_len, *gidarr_len;
 	int		i;
 	struct group_info *gi = cred->cr_cred->group_info;
+	struct user_namespace *userns = clnt->cl_cred ?
+		clnt->cl_cred->user_ns : &init_user_ns;
 
 	/* Credential */
 
@@ -122,14 +132,13 @@ unx_marshal(struct rpc_task *task, struct xdr_stream *xdr)
 	p = xdr_reserve_space(xdr, 3 * sizeof(*p));
 	if (!p)
 		goto marshal_failed;
-	*p++ = cpu_to_be32(from_kuid(&init_user_ns, cred->cr_cred->fsuid));
-	*p++ = cpu_to_be32(from_kgid(&init_user_ns, cred->cr_cred->fsgid));
+	*p++ = cpu_to_be32(from_kuid_munged(userns, cred->cr_cred->fsuid));
+	*p++ = cpu_to_be32(from_kgid_munged(userns, cred->cr_cred->fsgid));
 
 	gidarr_len = p++;
 	if (gi)
 		for (i = 0; i < UNX_NGROUPS && i < gi->ngroups; i++)
-			*p++ = cpu_to_be32(from_kgid(&init_user_ns,
-						     gi->gid[i]));
+			*p++ = cpu_to_be32(from_kgid_munged(userns, gi->gid[i]));
 	*gidarr_len = cpu_to_be32(p - gidarr_len - 1);
 	*cred_len = cpu_to_be32((p - cred_len - 1) << 2);
 	p = xdr_reserve_space(xdr, (p - gidarr_len - 1) << 2);

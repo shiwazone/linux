@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for Texas Instruments / National Semiconductor LM95234
  *
@@ -5,16 +6,6 @@
  *
  * Derived from lm95241.c
  * Copyright (C) 2008, 2010 Davide Rizzo <elpa.rizzo@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -310,7 +301,8 @@ static ssize_t tcrit2_store(struct device *dev, struct device_attribute *attr,
 	if (ret < 0)
 		return ret;
 
-	val = clamp_val(DIV_ROUND_CLOSEST(val, 1000), 0, index ? 255 : 127);
+	val = DIV_ROUND_CLOSEST(clamp_val(val, 0, (index ? 255 : 127) * 1000),
+				1000);
 
 	mutex_lock(&data->update_lock);
 	data->tcrit2[index] = val;
@@ -359,7 +351,7 @@ static ssize_t tcrit1_store(struct device *dev, struct device_attribute *attr,
 	if (ret < 0)
 		return ret;
 
-	val = clamp_val(DIV_ROUND_CLOSEST(val, 1000), 0, 255);
+	val = DIV_ROUND_CLOSEST(clamp_val(val, 0, 255000), 1000);
 
 	mutex_lock(&data->update_lock);
 	data->tcrit1[index] = val;
@@ -400,7 +392,7 @@ static ssize_t tcrit1_hyst_store(struct device *dev,
 	if (ret < 0)
 		return ret;
 
-	val = DIV_ROUND_CLOSEST(val, 1000);
+	val = DIV_ROUND_CLOSEST(clamp_val(val, -255000, 255000), 1000);
 	val = clamp_val((int)data->tcrit1[index] - val, 0, 31);
 
 	mutex_lock(&data->update_lock);
@@ -440,7 +432,7 @@ static ssize_t offset_store(struct device *dev, struct device_attribute *attr,
 		return ret;
 
 	/* Accuracy is 1/2 degrees C */
-	val = clamp_val(DIV_ROUND_CLOSEST(val, 500), -128, 127);
+	val = DIV_ROUND_CLOSEST(clamp_val(val, -64000, 63500), 500);
 
 	mutex_lock(&data->update_lock);
 	data->toffset[index] = val;
@@ -653,7 +645,7 @@ static int lm95234_detect(struct i2c_client *client,
 	if (val & model_mask)
 		return -ENODEV;
 
-	strlcpy(info->type, name, I2C_NAME_SIZE);
+	strscpy(info->type, name, I2C_NAME_SIZE);
 	return 0;
 }
 
@@ -686,9 +678,9 @@ static int lm95234_init_client(struct i2c_client *client)
 	return 0;
 }
 
-static int lm95234_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int lm95234_probe(struct i2c_client *client)
 {
+	enum chips type = (uintptr_t)i2c_get_match_data(client);
 	struct device *dev = &client->dev;
 	struct lm95234_data *data;
 	struct device *hwmon_dev;
@@ -707,7 +699,7 @@ static int lm95234_probe(struct i2c_client *client,
 		return err;
 
 	data->groups[0] = &lm95234_common_group;
-	if (id->driver_data == lm95234)
+	if (type == lm95234)
 		data->groups[1] = &lm95234_group;
 
 	hwmon_dev = devm_hwmon_device_register_with_groups(dev, client->name,

@@ -1,14 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * ADT7316 digital temperature sensor driver supporting ADT7316/7/8 ADT7516/7/9
  *
- *
  * Copyright 2010 Analog Devices Inc.
- *
- * Licensed under the GPL-2 or later.
  */
 
 #include <linux/interrupt.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
+#include <linux/irq.h>
 #include <linux/workqueue.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
@@ -209,15 +208,6 @@ struct adt7316_chip_info {
 #define ADT7516_AIN_INT_MASK		0xE0
 #define ADT7316_TEMP_AIN_INT_MASK	\
 	(ADT7316_TEMP_INT_MASK)
-
-/*
- * struct adt7316_chip_info - chip specific information
- */
-
-struct adt7316_limit_regs {
-	u16	data_high;
-	u16	data_low;
-};
 
 static ssize_t adt7316_show_enabled(struct device *dev,
 				    struct device_attribute *attr,
@@ -1349,9 +1339,9 @@ static ssize_t adt7316_show_in_analog_temp_offset(struct device *dev,
 }
 
 static ssize_t adt7316_store_in_analog_temp_offset(struct device *dev,
-						struct device_attribute *attr,
-						const char *buf,
-						size_t len)
+						   struct device_attribute *attr,
+						   const char *buf,
+						   size_t len)
 {
 	struct iio_dev *dev_info = dev_to_iio_dev(dev);
 	struct adt7316_chip_info *chip = iio_priv(dev_info);
@@ -1376,9 +1366,9 @@ static ssize_t adt7316_show_ex_analog_temp_offset(struct device *dev,
 }
 
 static ssize_t adt7316_store_ex_analog_temp_offset(struct device *dev,
-						struct device_attribute *attr,
-						const char *buf,
-						size_t len)
+						   struct device_attribute *attr,
+						   const char *buf,
+						   size_t len)
 {
 	struct iio_dev *dev_info = dev_to_iio_dev(dev);
 	struct adt7316_chip_info *chip = iio_priv(dev_info);
@@ -2155,7 +2145,8 @@ int adt7316_probe(struct device *dev, struct adt7316_bus *bus,
 	else
 		chip->dac_bits = 8;
 
-	chip->ldac_pin = devm_gpiod_get_optional(dev, "adi,ldac", GPIOD_OUT_LOW);
+	chip->ldac_pin = devm_gpiod_get_optional(dev, "adi,ldac",
+						 GPIOD_OUT_LOW);
 	if (IS_ERR(chip->ldac_pin)) {
 		ret = PTR_ERR(chip->ldac_pin);
 		dev_err(dev, "Failed to request ldac GPIO: %d\n", ret);
@@ -2171,7 +2162,6 @@ int adt7316_probe(struct device *dev, struct adt7316_bus *bus,
 	if ((chip->id & ID_FAMILY_MASK) == ID_ADT75XX)
 		chip->int_mask |= ADT7516_AIN_INT_MASK;
 
-	indio_dev->dev.parent = dev;
 	if ((chip->id & ID_FAMILY_MASK) == ID_ADT75XX)
 		indio_dev->info = &adt7516_info;
 	else

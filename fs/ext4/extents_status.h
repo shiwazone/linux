@@ -70,8 +70,8 @@ struct ext4_es_tree {
 
 struct ext4_es_stats {
 	unsigned long es_stats_shrunk;
-	unsigned long es_stats_cache_hits;
-	unsigned long es_stats_cache_misses;
+	struct percpu_counter es_stats_cache_hits;
+	struct percpu_counter es_stats_cache_misses;
 	u64 es_stats_scan_time;
 	u64 es_stats_max_scan_time;
 	struct percpu_counter es_stats_all_cnt;
@@ -127,19 +127,20 @@ extern int __init ext4_init_es(void);
 extern void ext4_exit_es(void);
 extern void ext4_es_init_tree(struct ext4_es_tree *tree);
 
-extern int ext4_es_insert_extent(struct inode *inode, ext4_lblk_t lblk,
-				 ext4_lblk_t len, ext4_fsblk_t pblk,
-				 unsigned int status);
+extern void ext4_es_insert_extent(struct inode *inode, ext4_lblk_t lblk,
+				  ext4_lblk_t len, ext4_fsblk_t pblk,
+				  unsigned int status);
 extern void ext4_es_cache_extent(struct inode *inode, ext4_lblk_t lblk,
 				 ext4_lblk_t len, ext4_fsblk_t pblk,
 				 unsigned int status);
-extern int ext4_es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
-				 ext4_lblk_t len);
+extern void ext4_es_remove_extent(struct inode *inode, ext4_lblk_t lblk,
+				  ext4_lblk_t len);
 extern void ext4_es_find_extent_range(struct inode *inode,
 				      int (*match_fn)(struct extent_status *es),
 				      ext4_lblk_t lblk, ext4_lblk_t end,
 				      struct extent_status *es);
 extern int ext4_es_lookup_extent(struct inode *inode, ext4_lblk_t lblk,
+				 ext4_lblk_t *next_lblk,
 				 struct extent_status *es);
 extern bool ext4_es_scan_range(struct inode *inode,
 			       int (*matching_fn)(struct extent_status *es),
@@ -208,6 +209,12 @@ static inline ext4_fsblk_t ext4_es_pblock(struct extent_status *es)
 	return es->es_pblk & ~ES_MASK;
 }
 
+static inline ext4_fsblk_t ext4_es_show_pblock(struct extent_status *es)
+{
+	ext4_fsblk_t pblock = ext4_es_pblock(es);
+	return pblock == ~ES_MASK ? 0 : pblock;
+}
+
 static inline void ext4_es_store_pblock(struct extent_status *es,
 					ext4_fsblk_t pb)
 {
@@ -242,11 +249,11 @@ extern void ext4_exit_pending(void);
 extern void ext4_init_pending_tree(struct ext4_pending_tree *tree);
 extern void ext4_remove_pending(struct inode *inode, ext4_lblk_t lblk);
 extern bool ext4_is_pending(struct inode *inode, ext4_lblk_t lblk);
-extern int ext4_es_insert_delayed_block(struct inode *inode, ext4_lblk_t lblk,
-					bool allocated);
+extern void ext4_es_insert_delayed_extent(struct inode *inode, ext4_lblk_t lblk,
+					  ext4_lblk_t len, bool lclu_allocated,
+					  bool end_allocated);
 extern unsigned int ext4_es_delayed_clu(struct inode *inode, ext4_lblk_t lblk,
 					ext4_lblk_t len);
-extern void ext4_es_remove_blks(struct inode *inode, ext4_lblk_t lblk,
-				ext4_lblk_t len);
+extern void ext4_clear_inode_es(struct inode *inode);
 
 #endif /* _EXT4_EXTENTS_STATUS_H */

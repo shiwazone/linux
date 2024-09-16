@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Linux-DVB Driver for DiBcom's DiB9000 and demodulator-family.
  *
  * Copyright (C) 2005-10 DiBcom (http://www.dibcom.fr/)
- *
- * This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License as
- *	published by the Free Software Foundation, version 2.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -14,7 +11,7 @@
 #include <linux/i2c.h>
 #include <linux/mutex.h>
 
-#include <media/dvb_math.h>
+#include <linux/int_log.h>
 #include <media/dvb_frontend.h>
 
 #include "dib9000.h"
@@ -261,7 +258,7 @@ static int dib9000_read16_attr(struct dib9000_state *state, u16 reg, u8 *b, u32 
 		state->i2c_write_buffer[0] |= (1 << 4);
 
 	do {
-		l = len < chunk_size ? len : chunk_size;
+		l = min(len, chunk_size);
 		state->msg[1].len = l;
 		state->msg[1].buf = b;
 		ret = i2c_transfer(state->i2c.i2c_adap, state->msg, 2) != 2 ? -EREMOTEIO : 0;
@@ -345,7 +342,7 @@ static int dib9000_write16_attr(struct dib9000_state *state, u16 reg, const u8 *
 		state->i2c_write_buffer[0] |= (1 << 4);
 
 	do {
-		l = len < chunk_size ? len : chunk_size;
+		l = min(len, chunk_size);
 		state->msg[0].len = l + 2;
 		memcpy(&state->i2c_write_buffer[2], buf, l);
 
@@ -2521,7 +2518,8 @@ struct dvb_frontend *dib9000_attach(struct i2c_adapter *i2c_adap, u8 i2c_addr, c
 	dibx000_init_i2c_master(&st->i2c_master, DIB7000MC, st->i2c.i2c_adap, st->i2c.i2c_addr);
 
 	st->tuner_adap.dev.parent = i2c_adap->dev.parent;
-	strncpy(st->tuner_adap.name, "DIB9000_FW TUNER ACCESS", sizeof(st->tuner_adap.name));
+	strscpy(st->tuner_adap.name, "DIB9000_FW TUNER ACCESS",
+		sizeof(st->tuner_adap.name));
 	st->tuner_adap.algo = &dib9000_tuner_algo;
 	st->tuner_adap.algo_data = NULL;
 	i2c_set_adapdata(&st->tuner_adap, st);
@@ -2529,7 +2527,8 @@ struct dvb_frontend *dib9000_attach(struct i2c_adapter *i2c_adap, u8 i2c_addr, c
 		goto error;
 
 	st->component_bus.dev.parent = i2c_adap->dev.parent;
-	strncpy(st->component_bus.name, "DIB9000_FW COMPONENT BUS ACCESS", sizeof(st->component_bus.name));
+	strscpy(st->component_bus.name, "DIB9000_FW COMPONENT BUS ACCESS",
+		sizeof(st->component_bus.name));
 	st->component_bus.algo = &dib9000_component_bus_algo;
 	st->component_bus.algo_data = NULL;
 	st->component_bus_speed = 340;
@@ -2547,7 +2546,7 @@ error:
 	kfree(st);
 	return NULL;
 }
-EXPORT_SYMBOL(dib9000_attach);
+EXPORT_SYMBOL_GPL(dib9000_attach);
 
 static const struct dvb_frontend_ops dib9000_ops = {
 	.delsys = { SYS_DVBT },

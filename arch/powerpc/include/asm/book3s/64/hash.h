@@ -4,6 +4,7 @@
 #ifdef __KERNEL__
 
 #include <asm/asm-const.h>
+#include <asm/book3s/64/slice.h>
 
 /*
  * Common bits between 4K and 64K pages in a linux-style PTE.
@@ -18,6 +19,10 @@
 #include <asm/book3s/64/hash-4k.h>
 #endif
 
+#define H_PTRS_PER_PTE		(1 << H_PTE_INDEX_SIZE)
+#define H_PTRS_PER_PMD		(1 << H_PMD_INDEX_SIZE)
+#define H_PTRS_PER_PUD		(1 << H_PUD_INDEX_SIZE)
+
 /* Bits to set in a PMD/PUD/PGD entry valid bit*/
 #define HASH_PMD_VAL_BITS		(0x8000000000000000UL)
 #define HASH_PUD_VAL_BITS		(0x8000000000000000UL)
@@ -29,6 +34,10 @@
 #define H_PGTABLE_EADDR_SIZE	(H_PTE_INDEX_SIZE + H_PMD_INDEX_SIZE + \
 				 H_PUD_INDEX_SIZE + H_PGD_INDEX_SIZE + PAGE_SHIFT)
 #define H_PGTABLE_RANGE		(ASM_CONST(1) << H_PGTABLE_EADDR_SIZE)
+/*
+ * Top 2 bits are ignored in page table walk.
+ */
+#define EA_MASK			(~(0xcUL << 60))
 
 /*
  * We store the slot details in the second half of page table.
@@ -42,58 +51,59 @@
 #endif
 
 /*
- * Define the address range of the kernel non-linear virtual area. In contrast
- * to the linear mapping, this is managed using the kernel page tables and then
- * inserted into the hash page table to actually take effect, similarly to user
- * mappings.
+ * +------------------------------+
+ * |                              |
+ * |                              |
+ * |                              |
+ * +------------------------------+  Kernel virtual map end (0xc00e000000000000)
+ * |                              |
+ * |                              |
+ * |      512TB/16TB of vmemmap   |
+ * |                              |
+ * |                              |
+ * +------------------------------+  Kernel vmemmap  start
+ * |                              |
+ * |      512TB/16TB of IO map    |
+ * |                              |
+ * +------------------------------+  Kernel IO map start
+ * |                              |
+ * |      512TB/16TB of vmap      |
+ * |                              |
+ * +------------------------------+  Kernel virt start (0xc008000000000000)
+ * |                              |
+ * |                              |
+ * |                              |
+ * +------------------------------+  Kernel linear (0xc.....)
  */
-#define H_KERN_VIRT_START ASM_CONST(0xD000000000000000)
 
-/*
- * Allow virtual mapping of one context size.
- * 512TB for 64K page size
- * 64TB for 4K page size
- */
-#define H_KERN_VIRT_SIZE (1UL << MAX_EA_BITS_PER_CONTEXT)
+#define H_VMALLOC_START		H_KERN_VIRT_START
+#define H_VMALLOC_SIZE		H_KERN_MAP_SIZE
+#define H_VMALLOC_END		(H_VMALLOC_START + H_VMALLOC_SIZE)
 
-/*
- * 8TB IO mapping size
- */
-#define H_KERN_IO_SIZE ASM_CONST(0x80000000000) /* 8T */
+#define H_KERN_IO_START		H_VMALLOC_END
+#define H_KERN_IO_SIZE		H_KERN_MAP_SIZE
+#define H_KERN_IO_END		(H_KERN_IO_START + H_KERN_IO_SIZE)
 
-/*
- * The vmalloc space starts at the beginning of the kernel non-linear virtual
- * region, and occupies 504T (64K) or 56T (4K)
- */
-#define H_VMALLOC_START H_KERN_VIRT_START
-#define H_VMALLOC_SIZE (H_KERN_VIRT_SIZE - H_KERN_IO_SIZE)
-#define H_VMALLOC_END  (H_VMALLOC_START + H_VMALLOC_SIZE)
+#define H_VMEMMAP_START		H_KERN_IO_END
+#define H_VMEMMAP_SIZE		H_KERN_MAP_SIZE
+#define H_VMEMMAP_END		(H_VMEMMAP_START + H_VMEMMAP_SIZE)
 
-#define H_KERN_IO_START H_VMALLOC_END
+#define NON_LINEAR_REGION_ID(ea)	((((unsigned long)ea - H_KERN_VIRT_START) >> REGION_SHIFT) + 2)
 
 /*
  * Region IDs
  */
-#define REGION_SHIFT		60UL
-#define REGION_MASK		(0xfUL << REGION_SHIFT)
-#define REGION_ID(ea)		(((unsigned long)(ea)) >> REGION_SHIFT)
-
-#define VMALLOC_REGION_ID	(REGION_ID(H_VMALLOC_START))
-#define KERNEL_REGION_ID	(REGION_ID(PAGE_OFFSET))
-#define VMEMMAP_REGION_ID	(0xfUL)	/* Server only */
-#define USER_REGION_ID		(0UL)
+#define USER_REGION_ID		0
+#define LINEAR_MAP_REGION_ID	1
+#define VMALLOC_REGION_ID	NON_LINEAR_REGION_ID(H_VMALLOC_START)
+#define IO_REGION_ID		NON_LINEAR_REGION_ID(H_KERN_IO_START)
+#define VMEMMAP_REGION_ID	NON_LINEAR_REGION_ID(H_VMEMMAP_START)
+#define INVALID_REGION_ID	(VMEMMAP_REGION_ID + 1)
 
 /*
  * Defines the address of the vmemap area, in its own region on
  * hash table CPUs.
  */
-#define H_VMEMMAP_BASE		(VMEMMAP_REGION_ID << REGION_SHIFT)
-
-#ifdef CONFIG_PPC_MM_SLICES
-#define HAVE_ARCH_UNMAPPED_AREA
-#define HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
-#endif /* CONFIG_PPC_MM_SLICES */
-
 
 /* PTEIDX nibble */
 #define _PTEIDX_SECONDARY	0x8
@@ -103,11 +113,45 @@
 #define H_PUD_BAD_BITS		(PMD_TABLE_SIZE-1)
 
 #ifndef __ASSEMBLY__
-#define	hash__pmd_bad(pmd)		(pmd_val(pmd) & H_PMD_BAD_BITS)
-#define	hash__pud_bad(pud)		(pud_val(pud) & H_PUD_BAD_BITS)
-static inline int hash__pgd_bad(pgd_t pgd)
+static inline int get_region_id(unsigned long ea)
 {
-	return (pgd_val(pgd) == 0);
+	int region_id;
+	int id = (ea >> 60UL);
+
+	if (id == 0)
+		return USER_REGION_ID;
+
+	if (id != (PAGE_OFFSET >> 60))
+		return INVALID_REGION_ID;
+
+	if (ea < H_KERN_VIRT_START)
+		return LINEAR_MAP_REGION_ID;
+
+	BUILD_BUG_ON(NON_LINEAR_REGION_ID(H_VMALLOC_START) != 2);
+
+	region_id = NON_LINEAR_REGION_ID(ea);
+	return region_id;
+}
+
+static inline int hash__pmd_same(pmd_t pmd_a, pmd_t pmd_b)
+{
+	return (((pmd_raw(pmd_a) ^ pmd_raw(pmd_b)) & ~cpu_to_be64(_PAGE_HPTEFLAGS)) == 0);
+}
+
+#define	hash__pmd_bad(pmd)		(pmd_val(pmd) & H_PMD_BAD_BITS)
+
+/*
+ * pud comparison that will work with both pte and page table pointer.
+ */
+static inline int hash__pud_same(pud_t pud_a, pud_t pud_b)
+{
+	return (((pud_raw(pud_a) ^ pud_raw(pud_b)) & ~cpu_to_be64(_PAGE_HPTEFLAGS)) == 0);
+}
+#define	hash__pud_bad(pud)		(pud_val(pud) & H_PUD_BAD_BITS)
+
+static inline int hash__p4d_bad(p4d_t p4d)
+{
+	return (p4d_val(p4d) == 0);
 }
 #ifdef CONFIG_STRICT_KERNEL_RWX
 extern void hash__mark_rodata_ro(void);
@@ -116,16 +160,12 @@ extern void hash__mark_initmem_nx(void);
 
 extern void hpte_need_flush(struct mm_struct *mm, unsigned long addr,
 			    pte_t *ptep, unsigned long pte, int huge);
-extern unsigned long htab_convert_pte_flags(unsigned long pteflags);
+unsigned long htab_convert_pte_flags(unsigned long pteflags, unsigned long flags);
 /* Atomic PTE updates */
-static inline unsigned long hash__pte_update(struct mm_struct *mm,
-					 unsigned long addr,
-					 pte_t *ptep, unsigned long clr,
-					 unsigned long set,
-					 int huge)
+static inline unsigned long hash__pte_update_one(pte_t *ptep, unsigned long clr,
+						 unsigned long set)
 {
 	__be64 old_be, tmp_be;
-	unsigned long old;
 
 	__asm__ __volatile__(
 	"1:	ldarx	%0,0,%3		# pte_update\n\
@@ -139,11 +179,40 @@ static inline unsigned long hash__pte_update(struct mm_struct *mm,
 	: "r" (ptep), "r" (cpu_to_be64(clr)), "m" (*ptep),
 	  "r" (cpu_to_be64(H_PAGE_BUSY)), "r" (cpu_to_be64(set))
 	: "cc" );
+
+	return be64_to_cpu(old_be);
+}
+
+static inline unsigned long hash__pte_update(struct mm_struct *mm,
+					 unsigned long addr,
+					 pte_t *ptep, unsigned long clr,
+					 unsigned long set,
+					 int huge)
+{
+	unsigned long old;
+
+	old = hash__pte_update_one(ptep, clr, set);
+
+	if (IS_ENABLED(CONFIG_PPC_4K_PAGES) && huge) {
+		unsigned int psize = get_slice_psize(mm, addr);
+		int nb, i;
+
+		if (psize == MMU_PAGE_16M)
+			nb = SZ_16M / PMD_SIZE;
+		else if (psize == MMU_PAGE_16G)
+			nb = SZ_16G / PUD_SIZE;
+		else
+			nb = 1;
+
+		WARN_ON_ONCE(nb == 1);	/* Should never happen */
+
+		for (i = 1; i < nb; i++)
+			hash__pte_update_one(ptep + i, clr, set);
+	}
 	/* huge pages use the old page table lock */
 	if (!huge)
 		assert_pte_locked(mm, addr);
 
-	old = be64_to_cpu(old_be);
 	if (old & H_PAGE_HASHPTE)
 		hpte_need_flush(mm, addr, ptep, old, huge);
 
@@ -222,7 +291,8 @@ extern int __meminit hash__vmemmap_create_mapping(unsigned long start,
 extern void hash__vmemmap_remove_mapping(unsigned long start,
 				     unsigned long page_size);
 
-int hash__create_section_mapping(unsigned long start, unsigned long end, int nid);
+int hash__create_section_mapping(unsigned long start, unsigned long end,
+				 int nid, pgprot_t prot);
 int hash__remove_section_mapping(unsigned long start, unsigned long end);
 
 #endif /* !__ASSEMBLY__ */

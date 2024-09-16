@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * lm92 - Hardware monitoring driver
  * Copyright (C) 2005-2008  Jean Delvare <jdelvare@suse.de>
@@ -24,16 +25,6 @@
  * Support could easily be added for the National Semiconductor LM76
  * and Maxim MAX6633 and MAX6634 chips, which are mostly compatible
  * with the LM92.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -108,7 +99,7 @@ static const u8 regs[t_num_regs] = {
 struct lm92_data {
 	struct i2c_client *client;
 	struct mutex update_lock;
-	char valid; /* zero until following fields are valid */
+	bool valid; /* false until following fields are valid */
 	unsigned long last_updated; /* in jiffies */
 
 	/* registers values */
@@ -135,7 +126,7 @@ static struct lm92_data *lm92_update_device(struct device *dev)
 				i2c_smbus_read_word_swapped(client, regs[i]);
 		}
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 
 	mutex_unlock(&data->update_lock);
@@ -296,13 +287,12 @@ static int lm92_detect(struct i2c_client *new_client,
 	else
 		return -ENODEV;
 
-	strlcpy(info->type, "lm92", I2C_NAME_SIZE);
+	strscpy(info->type, "lm92", I2C_NAME_SIZE);
 
 	return 0;
 }
 
-static int lm92_probe(struct i2c_client *new_client,
-		      const struct i2c_device_id *id)
+static int lm92_probe(struct i2c_client *new_client)
 {
 	struct device *hwmon_dev;
 	struct lm92_data *data;

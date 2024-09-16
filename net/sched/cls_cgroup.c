@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/cls_cgroup.c	Control Group Classifier
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Thomas Graf <tgraf@suug.ch>
  */
@@ -17,6 +13,7 @@
 #include <net/pkt_cls.h>
 #include <net/sock.h>
 #include <net/cls_cgroup.h>
+#include <net/tc_wrapper.h>
 
 struct cls_cgroup_head {
 	u32			handle;
@@ -26,12 +23,15 @@ struct cls_cgroup_head {
 	struct rcu_work		rwork;
 };
 
-static int cls_cgroup_classify(struct sk_buff *skb, const struct tcf_proto *tp,
-			       struct tcf_result *res)
+TC_INDIRECT_SCOPE int cls_cgroup_classify(struct sk_buff *skb,
+					  const struct tcf_proto *tp,
+					  struct tcf_result *res)
 {
 	struct cls_cgroup_head *head = rcu_dereference_bh(tp->root);
 	u32 classid = task_get_classid(skb);
 
+	if (unlikely(!head))
+		return -1;
 	if (!classid)
 		return -1;
 	if (!tcf_em_tree_match(skb, &head->ematches, NULL))
@@ -78,7 +78,7 @@ static void cls_cgroup_destroy_work(struct work_struct *work)
 static int cls_cgroup_change(struct net *net, struct sk_buff *in_skb,
 			     struct tcf_proto *tp, unsigned long base,
 			     u32 handle, struct nlattr **tca,
-			     void **arg, bool ovr, bool rtnl_held,
+			     void **arg, u32 flags,
 			     struct netlink_ext_ack *extack)
 {
 	struct nlattr *tb[TCA_CGROUP_MAX + 1];
@@ -104,13 +104,14 @@ static int cls_cgroup_change(struct net *net, struct sk_buff *in_skb,
 		goto errout;
 	new->handle = handle;
 	new->tp = tp;
-	err = nla_parse_nested(tb, TCA_CGROUP_MAX, tca[TCA_OPTIONS],
-			       cgroup_policy, NULL);
+	err = nla_parse_nested_deprecated(tb, TCA_CGROUP_MAX,
+					  tca[TCA_OPTIONS], cgroup_policy,
+					  NULL);
 	if (err < 0)
 		goto errout;
 
-	err = tcf_exts_validate(net, tp, tb, tca[TCA_RATE], &new->exts, ovr,
-				true, extack);
+	err = tcf_exts_validate(net, tp, tb, tca[TCA_RATE], &new->exts, flags,
+				extack);
 	if (err < 0)
 		goto errout;
 
@@ -176,7 +177,7 @@ static int cls_cgroup_dump(struct net *net, struct tcf_proto *tp, void *fh,
 
 	t->tcm_handle = head->handle;
 
-	nest = nla_nest_start(skb, TCA_OPTIONS);
+	nest = nla_nest_start_noflag(skb, TCA_OPTIONS);
 	if (nest == NULL)
 		goto nla_put_failure;
 
@@ -208,6 +209,7 @@ static struct tcf_proto_ops cls_cgroup_ops __read_mostly = {
 	.dump		=	cls_cgroup_dump,
 	.owner		=	THIS_MODULE,
 };
+MODULE_ALIAS_NET_CLS("cgroup");
 
 static int __init init_cgroup_cls(void)
 {
@@ -221,4 +223,5 @@ static void __exit exit_cgroup_cls(void)
 
 module_init(init_cgroup_cls);
 module_exit(exit_cgroup_cls);
+MODULE_DESCRIPTION("TC cgroup classifier");
 MODULE_LICENSE("GPL");

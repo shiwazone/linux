@@ -1,15 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2016 Thomas Graf <tgraf@tgraf.ch>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
  */
 
+#include <linux/filter.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/skbuff.h>
@@ -18,6 +11,8 @@
 #include <net/lwtunnel.h>
 #include <net/gre.h>
 #include <net/ip6_route.h>
+#include <net/ipv6_stubs.h>
+#include <net/inet_dscp.h>
 
 struct bpf_lwt_prog {
 	struct bpf_prog *prog;
@@ -44,14 +39,14 @@ static inline struct bpf_lwt *bpf_lwt_lwtunnel(struct lwtunnel_state *lwt)
 static int run_lwt_bpf(struct sk_buff *skb, struct bpf_lwt_prog *lwt,
 		       struct dst_entry *dst, bool can_redirect)
 {
+	struct bpf_net_context __bpf_net_ctx, *bpf_net_ctx;
 	int ret;
 
-	/* Preempt disable is needed to protect per-cpu redirect_info between
-	 * BPF prog and skb_do_redirect(). The call_rcu in bpf_prog_put() and
-	 * access to maps strictly require a rcu_read_lock() for protection,
-	 * mixing with BH RCU lock doesn't work.
+	/* Disabling BH is needed to protect per-CPU bpf_redirect_info between
+	 * BPF prog and skb_do_redirect().
 	 */
-	preempt_disable();
+	local_bh_disable();
+	bpf_net_ctx = bpf_net_ctx_set(&__bpf_net_ctx);
 	bpf_compute_data_pointers(skb);
 	ret = bpf_prog_run_save_cb(lwt->prog, skb);
 
@@ -67,9 +62,8 @@ static int run_lwt_bpf(struct sk_buff *skb, struct bpf_lwt_prog *lwt,
 			ret = BPF_OK;
 		} else {
 			skb_reset_mac_header(skb);
-			ret = skb_do_redirect(skb);
-			if (ret == 0)
-				ret = BPF_REDIRECT;
+			skb_do_redirect(skb);
+			ret = BPF_REDIRECT;
 		}
 		break;
 
@@ -85,7 +79,8 @@ static int run_lwt_bpf(struct sk_buff *skb, struct bpf_lwt_prog *lwt,
 		break;
 	}
 
-	preempt_enable();
+	bpf_net_ctx_clear(bpf_net_ctx);
+	local_bh_enable();
 
 	return ret;
 }
@@ -95,11 +90,16 @@ static int bpf_lwt_input_reroute(struct sk_buff *skb)
 	int err = -EINVAL;
 
 	if (skb->protocol == htons(ETH_P_IP)) {
+		struct net_device *dev = skb_dst(skb)->dev;
 		struct iphdr *iph = ip_hdr(skb);
 
+		dev_hold(dev);
+		skb_dst_drop(skb);
 		err = ip_route_input_noref(skb, iph->daddr, iph->saddr,
-					   iph->tos, skb_dst(skb)->dev);
+					   iph->tos, dev);
+		dev_put(dev);
 	} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		skb_dst_drop(skb);
 		err = ipv6_stub->ipv6_route_input(skb);
 	} else {
 		err = -EAFNOSUPPORT;
@@ -160,10 +160,8 @@ static int bpf_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 	return dst->lwtstate->orig_output(net, sk, skb);
 }
 
-static int xmit_check_hhlen(struct sk_buff *skb)
+static int xmit_check_hhlen(struct sk_buff *skb, int hh_len)
 {
-	int hh_len = skb_dst(skb)->dev->hard_header_len;
-
 	if (skb_headroom(skb) < hh_len) {
 		int nhead = HH_DATA_ALIGN(hh_len - skb_headroom(skb));
 
@@ -208,7 +206,7 @@ static int bpf_lwt_xmit_reroute(struct sk_buff *skb)
 		fl4.flowi4_oif = oif;
 		fl4.flowi4_mark = skb->mark;
 		fl4.flowi4_uid = sock_net_uid(net, sk);
-		fl4.flowi4_tos = RT_TOS(iph->tos);
+		fl4.flowi4_tos = iph->tos & INET_DSCP_MASK;
 		fl4.flowi4_flags = FLOWI_FLAG_ANYSRC;
 		fl4.flowi4_proto = iph->protocol;
 		fl4.daddr = iph->daddr;
@@ -232,9 +230,7 @@ static int bpf_lwt_xmit_reroute(struct sk_buff *skb)
 		fl6.daddr = iph6->daddr;
 		fl6.saddr = iph6->saddr;
 
-		err = ipv6_stub->ipv6_dst_lookup(net, skb->sk, &dst, &fl6);
-		if (unlikely(err))
-			goto err;
+		dst = ipv6_stub->ipv6_dst_lookup_flow(net, skb->sk, &fl6, NULL);
 		if (IS_ERR(dst)) {
 			err = PTR_ERR(dst);
 			goto err;
@@ -260,7 +256,7 @@ static int bpf_lwt_xmit_reroute(struct sk_buff *skb)
 
 	err = dst_output(dev_net(skb_dst(skb)->dev), skb->sk, skb);
 	if (unlikely(err))
-		return err;
+		return net_xmit_errno(err);
 
 	/* ip[6]_finish_output2 understand LWTUNNEL_XMIT_DONE */
 	return LWTUNNEL_XMIT_DONE;
@@ -277,6 +273,7 @@ static int bpf_xmit(struct sk_buff *skb)
 
 	bpf = bpf_lwt_lwtunnel(dst->lwtstate);
 	if (bpf->xmit.prog) {
+		int hh_len = dst->dev->hard_header_len;
 		__be16 proto = skb->protocol;
 		int ret;
 
@@ -294,7 +291,7 @@ static int bpf_xmit(struct sk_buff *skb)
 			/* If the header was expanded, headroom might be too
 			 * small for L2 header to come, expand as needed.
 			 */
-			ret = xmit_check_hhlen(skb);
+			ret = xmit_check_hhlen(skb, hh_len);
 			if (unlikely(ret))
 				return ret;
 
@@ -342,8 +339,8 @@ static int bpf_parse_prog(struct nlattr *attr, struct bpf_lwt_prog *prog,
 	int ret;
 	u32 fd;
 
-	ret = nla_parse_nested(tb, LWT_BPF_PROG_MAX, attr, bpf_prog_policy,
-			       NULL);
+	ret = nla_parse_nested_deprecated(tb, LWT_BPF_PROG_MAX, attr,
+					  bpf_prog_policy, NULL);
 	if (ret < 0)
 		return ret;
 
@@ -371,7 +368,7 @@ static const struct nla_policy bpf_nl_policy[LWT_BPF_MAX + 1] = {
 	[LWT_BPF_XMIT_HEADROOM]	= { .type = NLA_U32 },
 };
 
-static int bpf_build_state(struct nlattr *nla,
+static int bpf_build_state(struct net *net, struct nlattr *nla,
 			   unsigned int family, const void *cfg,
 			   struct lwtunnel_state **ts,
 			   struct netlink_ext_ack *extack)
@@ -384,7 +381,8 @@ static int bpf_build_state(struct nlattr *nla,
 	if (family != AF_INET && family != AF_INET6)
 		return -EAFNOSUPPORT;
 
-	ret = nla_parse_nested(tb, LWT_BPF_MAX, nla, bpf_nl_policy, extack);
+	ret = nla_parse_nested_deprecated(tb, LWT_BPF_MAX, nla, bpf_nl_policy,
+					  extack);
 	if (ret < 0)
 		return ret;
 
@@ -452,7 +450,7 @@ static int bpf_fill_lwt_prog(struct sk_buff *skb, int attr,
 	if (!prog->prog)
 		return 0;
 
-	nest = nla_nest_start(skb, attr);
+	nest = nla_nest_start_noflag(skb, attr);
 	if (!nest)
 		return -EMSGSIZE;
 

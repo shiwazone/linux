@@ -27,6 +27,7 @@
 #define __DRM_SYNCOBJ_H__
 
 #include <linux/dma-fence.h>
+#include <linux/dma-fence-chain.h>
 
 struct drm_file;
 
@@ -53,7 +54,11 @@ struct drm_syncobj {
 	 */
 	struct list_head cb_list;
 	/**
-	 * @lock: Protects &cb_list and write-locks &fence.
+	 * @ev_fd_list: List of registered eventfd.
+	 */
+	struct list_head ev_fd_list;
+	/**
+	 * @lock: Protects &cb_list and &ev_fd_list, and write-locks &fence.
 	 */
 	spinlock_t lock;
 	/**
@@ -112,6 +117,10 @@ drm_syncobj_fence_get(struct drm_syncobj *syncobj)
 
 struct drm_syncobj *drm_syncobj_find(struct drm_file *file_private,
 				     u32 handle);
+void drm_syncobj_add_point(struct drm_syncobj *syncobj,
+			   struct dma_fence_chain *chain,
+			   struct dma_fence *fence,
+			   uint64_t point);
 void drm_syncobj_replace_fence(struct drm_syncobj *syncobj,
 			       struct dma_fence *fence);
 int drm_syncobj_find_fence(struct drm_file *file_private,

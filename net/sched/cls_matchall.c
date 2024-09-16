@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/cls_matchll.c		Match-all classifier
  *
  * Copyright (c) 2016 Jiri Pirko <jiri@mellanox.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -16,6 +12,7 @@
 
 #include <net/sch_generic.h>
 #include <net/pkt_cls.h>
+#include <net/tc_wrapper.h>
 
 struct cls_mall_head {
 	struct tcf_exts exts;
@@ -25,12 +22,17 @@ struct cls_mall_head {
 	unsigned int in_hw_count;
 	struct tc_matchall_pcnt __percpu *pf;
 	struct rcu_work rwork;
+	bool deleting;
 };
 
-static int mall_classify(struct sk_buff *skb, const struct tcf_proto *tp,
-			 struct tcf_result *res)
+TC_INDIRECT_SCOPE int mall_classify(struct sk_buff *skb,
+				    const struct tcf_proto *tp,
+				    struct tcf_result *res)
 {
 	struct cls_mall_head *head = rcu_dereference_bh(tp->root);
+
+	if (unlikely(!head))
+		return -1;
 
 	if (tc_skip_sw(head->flags))
 		return -1;
@@ -75,8 +77,8 @@ static void mall_destroy_hw_filter(struct tcf_proto *tp,
 	cls_mall.command = TC_CLSMATCHALL_DESTROY;
 	cls_mall.cookie = cookie;
 
-	tc_setup_cb_call(block, TC_SETUP_CLSMATCHALL, &cls_mall, false);
-	tcf_block_offload_dec(block, &head->flags);
+	tc_setup_cb_destroy(block, tp, TC_SETUP_CLSMATCHALL, &cls_mall, false,
+			    &head->flags, &head->in_hw_count, true);
 }
 
 static int mall_replace_hw_filter(struct tcf_proto *tp,
@@ -89,18 +91,31 @@ static int mall_replace_hw_filter(struct tcf_proto *tp,
 	bool skip_sw = tc_skip_sw(head->flags);
 	int err;
 
+	cls_mall.rule =	flow_rule_alloc(tcf_exts_num_actions(&head->exts));
+	if (!cls_mall.rule)
+		return -ENOMEM;
+
 	tc_cls_common_offload_init(&cls_mall.common, tp, head->flags, extack);
 	cls_mall.command = TC_CLSMATCHALL_REPLACE;
-	cls_mall.exts = &head->exts;
 	cls_mall.cookie = cookie;
 
-	err = tc_setup_cb_call(block, TC_SETUP_CLSMATCHALL, &cls_mall, skip_sw);
-	if (err < 0) {
+	err = tc_setup_offload_action(&cls_mall.rule->action, &head->exts,
+				      cls_mall.common.extack);
+	if (err) {
+		kfree(cls_mall.rule);
+		mall_destroy_hw_filter(tp, head, cookie, NULL);
+
+		return skip_sw ? err : 0;
+	}
+
+	err = tc_setup_cb_add(block, tp, TC_SETUP_CLSMATCHALL, &cls_mall,
+			      skip_sw, &head->flags, &head->in_hw_count, true);
+	tc_cleanup_offload_action(&cls_mall.rule->action);
+	kfree(cls_mall.rule);
+
+	if (err) {
 		mall_destroy_hw_filter(tp, head, cookie, NULL);
 		return err;
-	} else if (err > 0) {
-		head->in_hw_count = err;
-		tcf_block_offload_inc(block, &head->flags);
 	}
 
 	if (skip_sw && !(head->flags & TCA_CLS_FLAGS_IN_HW))
@@ -141,38 +156,20 @@ static void *mall_get(struct tcf_proto *tp, u32 handle)
 static const struct nla_policy mall_policy[TCA_MATCHALL_MAX + 1] = {
 	[TCA_MATCHALL_UNSPEC]		= { .type = NLA_UNSPEC },
 	[TCA_MATCHALL_CLASSID]		= { .type = NLA_U32 },
+	[TCA_MATCHALL_FLAGS]		= { .type = NLA_U32 },
 };
-
-static int mall_set_parms(struct net *net, struct tcf_proto *tp,
-			  struct cls_mall_head *head,
-			  unsigned long base, struct nlattr **tb,
-			  struct nlattr *est, bool ovr,
-			  struct netlink_ext_ack *extack)
-{
-	int err;
-
-	err = tcf_exts_validate(net, tp, tb, est, &head->exts, ovr, true,
-				extack);
-	if (err < 0)
-		return err;
-
-	if (tb[TCA_MATCHALL_CLASSID]) {
-		head->res.classid = nla_get_u32(tb[TCA_MATCHALL_CLASSID]);
-		tcf_bind_filter(tp, &head->res, base);
-	}
-	return 0;
-}
 
 static int mall_change(struct net *net, struct sk_buff *in_skb,
 		       struct tcf_proto *tp, unsigned long base,
 		       u32 handle, struct nlattr **tca,
-		       void **arg, bool ovr, bool rtnl_held,
+		       void **arg, u32 flags,
 		       struct netlink_ext_ack *extack)
 {
 	struct cls_mall_head *head = rtnl_dereference(tp->root);
 	struct nlattr *tb[TCA_MATCHALL_MAX + 1];
+	bool bound_to_filter = false;
 	struct cls_mall_head *new;
-	u32 flags = 0;
+	u32 userflags = 0;
 	int err;
 
 	if (!tca[TCA_OPTIONS])
@@ -181,14 +178,14 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 	if (head)
 		return -EEXIST;
 
-	err = nla_parse_nested(tb, TCA_MATCHALL_MAX, tca[TCA_OPTIONS],
-			       mall_policy, NULL);
+	err = nla_parse_nested_deprecated(tb, TCA_MATCHALL_MAX,
+					  tca[TCA_OPTIONS], mall_policy, NULL);
 	if (err < 0)
 		return err;
 
 	if (tb[TCA_MATCHALL_FLAGS]) {
-		flags = nla_get_u32(tb[TCA_MATCHALL_FLAGS]);
-		if (!tc_flags_valid(flags))
+		userflags = nla_get_u32(tb[TCA_MATCHALL_FLAGS]);
+		if (!tc_flags_valid(userflags))
 			return -EINVAL;
 	}
 
@@ -203,17 +200,23 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 	if (!handle)
 		handle = 1;
 	new->handle = handle;
-	new->flags = flags;
+	new->flags = userflags;
 	new->pf = alloc_percpu(struct tc_matchall_pcnt);
 	if (!new->pf) {
 		err = -ENOMEM;
 		goto err_alloc_percpu;
 	}
 
-	err = mall_set_parms(net, tp, new, base, tb, tca[TCA_RATE], ovr,
-			     extack);
-	if (err)
+	err = tcf_exts_validate_ex(net, tp, tb, tca[TCA_RATE],
+				   &new->exts, flags, new->flags, extack);
+	if (err < 0)
 		goto err_set_parms;
+
+	if (tb[TCA_MATCHALL_CLASSID]) {
+		new->res.classid = nla_get_u32(tb[TCA_MATCHALL_CLASSID]);
+		tcf_bind_filter(tp, &new->res, base);
+		bound_to_filter = true;
+	}
 
 	if (!tc_skip_hw(new->flags)) {
 		err = mall_replace_hw_filter(tp, new, (unsigned long)new,
@@ -230,6 +233,8 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 	return 0;
 
 err_replace_hw_filter:
+	if (bound_to_filter)
+		tcf_unbind_filter(tp, &new->res);
 err_set_parms:
 	free_percpu(new->pf);
 err_alloc_percpu:
@@ -242,7 +247,11 @@ err_exts_init:
 static int mall_delete(struct tcf_proto *tp, void *arg, bool *last,
 		       bool rtnl_held, struct netlink_ext_ack *extack)
 {
-	return -EOPNOTSUPP;
+	struct cls_mall_head *head = rtnl_dereference(tp->root);
+
+	head->deleting = true;
+	*last = true;
+	return 0;
 }
 
 static void mall_walk(struct tcf_proto *tp, struct tcf_walker *arg,
@@ -253,7 +262,7 @@ static void mall_walk(struct tcf_proto *tp, struct tcf_walker *arg,
 	if (arg->count < arg->skip)
 		goto skip;
 
-	if (!head)
+	if (!head || head->deleting)
 		return;
 	if (arg->fn(tp, head, arg) < 0)
 		arg->stop = 1;
@@ -261,7 +270,7 @@ skip:
 	arg->count++;
 }
 
-static int mall_reoffload(struct tcf_proto *tp, bool add, tc_setup_cb_t *cb,
+static int mall_reoffload(struct tcf_proto *tp, bool add, flow_setup_cb_t *cb,
 			  void *cb_priv, struct netlink_ext_ack *extack)
 {
 	struct cls_mall_head *head = rtnl_dereference(tp->root);
@@ -272,22 +281,46 @@ static int mall_reoffload(struct tcf_proto *tp, bool add, tc_setup_cb_t *cb,
 	if (tc_skip_hw(head->flags))
 		return 0;
 
+	cls_mall.rule =	flow_rule_alloc(tcf_exts_num_actions(&head->exts));
+	if (!cls_mall.rule)
+		return -ENOMEM;
+
 	tc_cls_common_offload_init(&cls_mall.common, tp, head->flags, extack);
 	cls_mall.command = add ?
 		TC_CLSMATCHALL_REPLACE : TC_CLSMATCHALL_DESTROY;
-	cls_mall.exts = &head->exts;
 	cls_mall.cookie = (unsigned long)head;
 
-	err = cb(TC_SETUP_CLSMATCHALL, &cls_mall, cb_priv);
+	err = tc_setup_offload_action(&cls_mall.rule->action, &head->exts,
+				      cls_mall.common.extack);
 	if (err) {
-		if (add && tc_skip_sw(head->flags))
-			return err;
-		return 0;
+		kfree(cls_mall.rule);
+
+		return add && tc_skip_sw(head->flags) ? err : 0;
 	}
 
-	tc_cls_offload_cnt_update(block, &head->in_hw_count, &head->flags, add);
+	err = tc_setup_cb_reoffload(block, tp, add, cb, TC_SETUP_CLSMATCHALL,
+				    &cls_mall, cb_priv, &head->flags,
+				    &head->in_hw_count);
+	tc_cleanup_offload_action(&cls_mall.rule->action);
+	kfree(cls_mall.rule);
 
-	return 0;
+	return err;
+}
+
+static void mall_stats_hw_filter(struct tcf_proto *tp,
+				 struct cls_mall_head *head,
+				 unsigned long cookie)
+{
+	struct tc_cls_matchall_offload cls_mall = {};
+	struct tcf_block *block = tp->chain->block;
+
+	tc_cls_common_offload_init(&cls_mall.common, tp, head->flags, NULL);
+	cls_mall.command = TC_CLSMATCHALL_STATS;
+	cls_mall.cookie = cookie;
+
+	tc_setup_cb_call(block, TC_SETUP_CLSMATCHALL, &cls_mall, false, true);
+
+	tcf_exts_hw_stats_update(&head->exts, &cls_mall.stats, cls_mall.use_act_stats);
 }
 
 static int mall_dump(struct net *net, struct tcf_proto *tp, void *fh,
@@ -301,9 +334,12 @@ static int mall_dump(struct net *net, struct tcf_proto *tp, void *fh,
 	if (!head)
 		return skb->len;
 
+	if (!tc_skip_hw(head->flags))
+		mall_stats_hw_filter(tp, head, (unsigned long)head);
+
 	t->tcm_handle = head->handle;
 
-	nest = nla_nest_start(skb, TCA_OPTIONS);
+	nest = nla_nest_start_noflag(skb, TCA_OPTIONS);
 	if (!nest)
 		goto nla_put_failure;
 
@@ -340,12 +376,12 @@ nla_put_failure:
 	return -1;
 }
 
-static void mall_bind_class(void *fh, u32 classid, unsigned long cl)
+static void mall_bind_class(void *fh, u32 classid, unsigned long cl, void *q,
+			    unsigned long base)
 {
 	struct cls_mall_head *head = fh;
 
-	if (head && head->res.classid == classid)
-		head->res.class = cl;
+	tc_cls_bind_class(classid, cl, q, &head->res, base);
 }
 
 static struct tcf_proto_ops cls_mall_ops __read_mostly = {
@@ -362,6 +398,7 @@ static struct tcf_proto_ops cls_mall_ops __read_mostly = {
 	.bind_class	= mall_bind_class,
 	.owner		= THIS_MODULE,
 };
+MODULE_ALIAS_NET_CLS("matchall");
 
 static int __init cls_mall_init(void)
 {

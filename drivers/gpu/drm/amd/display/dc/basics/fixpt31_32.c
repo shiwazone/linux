@@ -26,6 +26,10 @@
 #include "dm_services.h"
 #include "include/fixed31_32.h"
 
+static const struct fixed31_32 dc_fixpt_two_pi = { 26986075409LL };
+static const struct fixed31_32 dc_fixpt_ln2 = { 2977044471LL };
+static const struct fixed31_32 dc_fixpt_ln2_div_2 = { 1488522236LL };
+
 static inline unsigned long long abs_i64(
 	long long arg)
 {
@@ -136,8 +140,6 @@ struct fixed31_32 dc_fixpt_mul(struct fixed31_32 arg1, struct fixed31_32 arg2)
 
 	res.value = arg1_int * arg2_int;
 
-	ASSERT(res.value <= LONG_MAX);
-
 	res.value <<= FIXED31_32_BITS_PER_FRACTIONAL_PART;
 
 	tmp = arg1_int * arg2_fra;
@@ -180,8 +182,6 @@ struct fixed31_32 dc_fixpt_sqr(struct fixed31_32 arg)
 	unsigned long long tmp;
 
 	res.value = arg_int * arg_int;
-
-	ASSERT(res.value <= LONG_MAX);
 
 	res.value <<= FIXED31_32_BITS_PER_FRACTIONAL_PART;
 
@@ -447,6 +447,11 @@ static inline unsigned int clamp_ux_dy(
 		return truncated_val;
 	else
 		return min_clamp;
+}
+
+unsigned int dc_fixpt_u4d19(struct fixed31_32 arg)
+{
+	return ux_dy(arg.value, 4, 19);
 }
 
 unsigned int dc_fixpt_u3d19(struct fixed31_32 arg)

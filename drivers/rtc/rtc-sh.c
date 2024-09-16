@@ -276,6 +276,9 @@ static int sh_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	struct sh_rtc *rtc = dev_get_drvdata(dev);
 	unsigned int sec128, sec2, yr, yr100, cf_bit;
 
+	if (!(readb(rtc->regbase + RCR2) & RCR2_RTCEN))
+		return -EINVAL;
+
 	do {
 		unsigned int tmp;
 
@@ -466,8 +469,7 @@ static int __init sh_rtc_probe(struct platform_device *pdev)
 {
 	struct sh_rtc *rtc;
 	struct resource *res;
-	struct rtc_time r;
-	char clk_name[6];
+	char clk_name[14];
 	int clk_id, ret;
 
 	rtc = devm_kzalloc(&pdev->dev, sizeof(*rtc), GFP_KERNEL);
@@ -502,8 +504,7 @@ static int __init sh_rtc_probe(struct platform_device *pdev)
 	if (unlikely(!rtc->res))
 		return -EBUSY;
 
-	rtc->regbase = devm_ioremap_nocache(&pdev->dev, rtc->res->start,
-					rtc->regsize);
+	rtc->regbase = devm_ioremap(&pdev->dev, rtc->res->start, rtc->regsize);
 	if (unlikely(!rtc->regbase))
 		return -EINVAL;
 
@@ -527,6 +528,10 @@ static int __init sh_rtc_probe(struct platform_device *pdev)
 		 */
 		rtc->clk = NULL;
 	}
+
+	rtc->rtc_dev = devm_rtc_allocate_device(&pdev->dev);
+	if (IS_ERR(rtc->rtc_dev))
+		return PTR_ERR(rtc->rtc_dev);
 
 	clk_enable(rtc->clk);
 
@@ -591,20 +596,20 @@ static int __init sh_rtc_probe(struct platform_device *pdev)
 	sh_rtc_setaie(&pdev->dev, 0);
 	sh_rtc_setcie(&pdev->dev, 0);
 
-	rtc->rtc_dev = devm_rtc_device_register(&pdev->dev, "sh",
-					   &sh_rtc_ops, THIS_MODULE);
-	if (IS_ERR(rtc->rtc_dev)) {
-		ret = PTR_ERR(rtc->rtc_dev);
-		goto err_unmap;
-	}
-
+	rtc->rtc_dev->ops = &sh_rtc_ops;
 	rtc->rtc_dev->max_user_freq = 256;
 
-	/* reset rtc to epoch 0 if time is invalid */
-	if (rtc_read_time(rtc->rtc_dev, &r) < 0) {
-		rtc_time_to_tm(0, &r);
-		rtc_set_time(rtc->rtc_dev, &r);
+	if (rtc->capabilities & RTC_CAP_4_DIGIT_YEAR) {
+		rtc->rtc_dev->range_min = RTC_TIMESTAMP_BEGIN_1900;
+		rtc->rtc_dev->range_max = RTC_TIMESTAMP_END_9999;
+	} else {
+		rtc->rtc_dev->range_min = mktime64(1999, 1, 1, 0, 0, 0);
+		rtc->rtc_dev->range_max = mktime64(2098, 12, 31, 23, 59, 59);
 	}
+
+	ret = devm_rtc_register_device(rtc->rtc_dev);
+	if (ret)
+		goto err_unmap;
 
 	device_init_wakeup(&pdev->dev, 1);
 	return 0;
@@ -615,7 +620,7 @@ err_unmap:
 	return ret;
 }
 
-static int __exit sh_rtc_remove(struct platform_device *pdev)
+static void __exit sh_rtc_remove(struct platform_device *pdev)
 {
 	struct sh_rtc *rtc = platform_get_drvdata(pdev);
 
@@ -623,8 +628,6 @@ static int __exit sh_rtc_remove(struct platform_device *pdev)
 	sh_rtc_setcie(&pdev->dev, 0);
 
 	clk_disable(rtc->clk);
-
-	return 0;
 }
 
 static void sh_rtc_set_irq_wake(struct device *dev, int enabled)
@@ -663,13 +666,19 @@ static const struct of_device_id sh_rtc_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, sh_rtc_of_match);
 
-static struct platform_driver sh_rtc_platform_driver = {
+/*
+ * sh_rtc_remove() lives in .exit.text. For drivers registered via
+ * module_platform_driver_probe() this is ok because they cannot get unbound at
+ * runtime. So mark the driver struct with __refdata to prevent modpost
+ * triggering a section mismatch warning.
+ */
+static struct platform_driver sh_rtc_platform_driver __refdata = {
 	.driver		= {
 		.name	= DRV_NAME,
 		.pm	= &sh_rtc_pm_ops,
 		.of_match_table = sh_rtc_of_match,
 	},
-	.remove		= __exit_p(sh_rtc_remove),
+	.remove_new	= __exit_p(sh_rtc_remove),
 };
 
 module_platform_driver_probe(sh_rtc_platform_driver, sh_rtc_probe);
